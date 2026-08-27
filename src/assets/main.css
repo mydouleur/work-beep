@@ -1,0 +1,15 @@
+:root{
+    --color-primary: #ffffff;
+    --color-inverse: #000000;
+    --color-secondary-1: #39ff14;
+    --color-secondary-2: #6c2bd9;
+    --color-neutral: #333333;
+}
+
+[data-theme="dark"] {
+    --color-primary: #000000;
+    --color-inverse: #ffffff;
+    --color-secondary-1: #e4124a;
+    --color-secondary-2: #05e0bf;
+    --color-neutral: #cccccc;
+}

@@ -1,0 +1,52 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.kilo
+
+# llama.cpp && gguf
+inference
+
+# docs
+docs
+miemiebeep/
+# Tauri / Rust build artifacts
+src-tauri/target
+src-tauri/gen
+
+# Blender portable runtime
+blender_packges
+
+# Python 字节码缓存（bridge/ 下由 Blender 运行时生成）
+__pycache__/
+*.pyc
+
+
+# 运行时插件目录（由插件 deploy 脚本填充，不进版本库）
+plugins/
+
+# 可独立调试的主程序包（pnpm dist:host 组装）
+dist-host/

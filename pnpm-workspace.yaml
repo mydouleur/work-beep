@@ -1,0 +1,5 @@
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - pinia@4.0.2
+  - vue-router@5.2.0

@@ -1,0 +1,36 @@
+{
+  "name": "miemiebeep",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "dist:host": "node scripts/dist-host.mjs"
+  },
+  "dependencies": {
+    "@beep/sdk": "file:../sdk",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-fs": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "animejs": "^4.5.0",
+    "katex": "^0.18.1",
+    "markstream-vue": "^1.0.9",
+    "openai": "^7.4.0",
+    "pinia": "^4.0.2",
+    "shiki": "^4.4.2",
+    "vue": "^3.5.13",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "~5.6.2",
+    "vite": "^8.1.4",
+    "vite-plugin-vue-devtools": "^8.1.5",
+    "vue-tsc": "^3.3.7"
+  }
+}

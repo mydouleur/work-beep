@@ -1,0 +1,36 @@
+@import url("./main.css");
+
+:root {
+    /* 布局颜色 */
+    --color-titlebar-background: color-mix(in srgb, var(--color-primary), gray 5%);
+    --color-home-background:  color-mix(in srgb, var(--color-primary), gray 10%)  ;
+    --color-border: color-mix(in srgb, var(--color-inverse), transparent 80%);
+    --color-text: var(--color-inverse);
+    --color-input-background: var(--color-primary);
+    --color-message-background: color-mix(in srgb, var(--color-primary), gray 15%);
+    /* 按钮颜色 */
+    --color-solid-button-background: var(--color-primary);
+    --color-solid-button-text: var(--color-inverse);
+    --color-solid-button-shadow-1: var(--color-secondary-1);
+    --color-solid-button-shadow-2: var(--color-secondary-2);
+    --color-solid-outline: var(--color-secondary-1);
+
+    --color-space-button-background: var(--color-secondary-1);
+    --color-space-button-text: var(--color-inverse);
+    --color-space-button-shadow-1: var(--color-secondary-1);
+    --color-space-button-shadow-2: var(--color-secondary-2);
+    --color-space-outline: var(--color-inverse);
+
+    /* 下拉选择框 */
+    --color-select-background: var(--color-secondary-1);
+    --color-select-text: var(--color-inverse);
+    --color-select-shadow: var(--color-secondary-2);
+    --color-select-background-active: var(--color-secondary-2);
+    --color-select-shadow-active: var(--color-secondary-1);
+
+    --color-select-popup-background: var(--color-primary);
+    --color-select-popup-border: var(--color-inverse);
+    --color-select-popup-shadow: var(--color-secondary-2);
+    --color-select-option-hover: var(--color-secondary-1);
+    --color-select-option-selected: var(--color-secondary-2);
+}

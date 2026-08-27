@@ -45,8 +45,8 @@ __pycache__/
 *.pyc
 
 
-# 运行时插件目录（由插件 deploy 脚本填充，不进版本库）
-plugins/
+# 运行时插件目录（由插件 deploy 脚本填充，不进版本库；/ 锚定根目录，避免误伤 src/plugins/）
+/plugins/
 
 # 可独立调试的主程序包（pnpm dist:host 组装）
 dist-host/

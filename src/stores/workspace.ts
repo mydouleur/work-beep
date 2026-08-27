@@ -1,5 +1,5 @@
 // 工作区状态：内置 5 工具的锚定目录。
-// 拆分阶段的最小行为（语义细则属主项目后续设计，见 tidy-up/task.md §9.2）：
+// 拆分阶段的最小行为（语义细则属主项目后续设计）：
 // 用户经系统对话框显式选择；Rust 侧把所选目录加进 fs 插件运行时 scope。
 import { defineStore } from "pinia";
 import { ref } from "vue";

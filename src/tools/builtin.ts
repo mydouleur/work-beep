@@ -1,6 +1,6 @@
 // 内置 5 工具（read/write/edit/ls/grep，DoAgent 式极简文件面，无 shell）。
 // 全部锚定"当前工作区"（workspace store）；未选工作区时返回提示文案而非报错。
-// 边界：词法归一防逃逸（symlink 级加固是主项目后续设计，见 tidy-up/task.md §9.2）；
+// 边界：词法归一防逃逸（symlink 级加固是主项目后续设计）；
 // 物理边界由 fs 插件 scope 兜底（set_workspace 只放行选过的目录）。
 // 源头截断原则：read 限行、ls 限条、grep 限文件数与匹配数。
 import { exists, readDir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";

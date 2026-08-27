@@ -11,7 +11,7 @@
     "dist:host": "node scripts/dist-host.mjs"
   },
   "dependencies": {
-    "@beep/sdk": "file:../sdk",
+    "@beep/sdk": "file:../work-beep-plugin-sdk",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-fs": "^2",

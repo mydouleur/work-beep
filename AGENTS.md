@@ -4,8 +4,8 @@
 
 blenderBeeper 的**主项目（Host）**：Tauri 2 + Vue 3 桌面壳，定位智能体启动器。
 左侧 Chat 是软件本体（LLM 走云端 OpenAI 兼容 API，配置在 .env），右栏是**运行时加载**的插件容器
-（exe 旁 `plugins/` 目录，dev 时为仓库内 `plugins/`）。插件契约见 `@beep/sdk`（beep-sdk 仓库），
-首个参考插件是 beep-plugin-blender。设计与拍板记录见 `../task.md`（tidy-up/task.md）。
+（exe 旁 `plugins/` 目录，dev 时为仓库内 `plugins/`）。插件契约见 `@beep/sdk`
+（work-beep-plugin-sdk 仓库），首个参考插件是 work-beep-plugin-blender。
 
 - 前端：Vue 3（`<script setup>` SFC）+ Vite 8 + TypeScript（strict）+ pinia
 - 桌面壳：Tauri 2（Rust 后端，`src-tauri/`），仅 Windows 有窗口嵌入实现
@@ -53,7 +53,7 @@ pnpm dist:host            # 组装 dist-host/（beep-host.exe + plugins/），�
 - 代码注释与文档用中文；commit message 按 Conventional Commits、中文撰写。
 - 颜色不硬编码：`assets/main.css` 调色板 + `assets/tokens.css` 语义映射，组件内 `var(--color-...)`。
 - 新增 Tauri API 调用必须同步 `src-tauri/capabilities/default.json` 权限（最小权限原则）。
-- 插件机制改动时同步 `../task.md`（设计文档）与 sdk 仓库的 example 说明。
+- 插件机制改动时同步 sdk 仓库（work-beep-plugin-sdk）的 example 说明。
 
 ## 安全
 
@@ -61,3 +61,19 @@ pnpm dist:host            # 组装 dist-host/（beep-host.exe + plugins/），�
 - fs 插件 scope 只放行：用户显式选择的工作区目录 + 插件目录（运行时 `allow_directory`）。
 - 内置工具无 shell；插件工具注入是模型能力面的唯一扩展通道。
 - 桥转发只连 `127.0.0.1`；`plugins/`、`dist-host/`、`blender_packges` 类大体积产物不进库。
+
+## 技术债与待办
+
+- **未真机验收**（拆分后最高优先）：① `pnpm tauri dev` 右栏下拉出现 Blender → 激活 → 面板渲染；
+  ② 启动 Blender → 嵌入右栏 → 拖分隔条跟随；③ 对话调 `blender.view_front` 成功；
+  ④ 删掉 `plugins/blender/` 后 Host 照常启动、显示"未激活插件"。跑不过先查 plugins/ 路径与 fs scope。
+- **命名未统一**：package.json / Cargo crate 仍叫 `miemiebeep`（exe 即 miemiebeep.exe，
+  dist-host 组装时改名 beep-host.exe）；tauri.conf productName 是 blenderBeeper。
+- **{base} 占位符是过渡方案**：dev 锚 CARGO_MANIFEST_DIR 上级、release 锚 exe 目录；
+  正式解法是插件 resolveAsset 通道（Blender 插件已走通），Host 自身残留 {base} 使用应逐步清除。
+- **工作区边界**：词法归一 + fs scope，未做 realpath 级 symlink 防护。
+- **发 Release**：本机无 gh CLI，用 `git credential fill` 取 token 调 GitHub API；换机器需重来或装 gh。
+- 旧项目 `D:\blenderBeep` 仍在原位未归档，确认新体系稳定后再处置。
+- 后续方向（均未拍板）：provider 管理（现 .env）、工作区细则、edit/grep 语义强化、
+  多面板、社区生态（插件市场/签名）；新插件（shell/WPS）验证 SDK 通用性，shell 需 Host 加
+  stdio 通道（SDK 已预留扩展点）。

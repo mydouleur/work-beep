@@ -1,6 +1,6 @@
 // 工具注册表：内置工具（无命名空间）+ 插件注入工具（强制 "插件id." 前缀）。
 // 供 agent 循环拼 tools schema、校验参数、派发执行。
-// 设计原则（见 tidy-up/task.md）：schema 要短（token 大头），校验失败作为 tool 错误喂回模型。
+// 设计原则：schema 要短（token 大头），校验失败作为 tool 错误喂回模型。
 import type OpenAI from "openai";
 import type { PluginTool } from "@beep/sdk";
 

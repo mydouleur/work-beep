@@ -1,7 +1,7 @@
 // 组装可独立调试的主程序包：dist-host/ = release exe + 空 plugins/ 目录。
 // 前置：已跑过 pnpm tauri build（--no-bundle）。产物不进版本库。
 // 用途：插件作者把这个文件夹拷走（或直接用 sdk/example/host-app、
-// plugin-blender/host-app 里的副本），把插件产物放进 plugins/<id>/ 即可调试。
+// work-beep-plugin-blender/host-app 里的副本），把插件产物放进 plugins/<id>/ 即可调试。
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

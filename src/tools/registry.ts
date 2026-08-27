@@ -41,12 +41,13 @@ export function unregisterPlugin(pluginId: string) {
 }
 
 // OpenAI function name 只允许 a-zA-Z0-9_-（服务端 400 硬校验），而插件工具名带 "." 前缀。
-// 这里是 API 边界上的纯编码层：发 schema 时把 "." 改写为 "__"，执行 tool_call 时按映射找回
-// 真名。注册表内部与插件契约始终用真名（blender.view_front），契约不变。
+// 这里是 API 边界上的纯编码层：发 schema 时把 "." 改写为 "_"（blender.view_front →
+// blender_view_front，保持函数名观感自然），执行 tool_call 时按映射表找回真名。
+// 注册表内部与插件契约始终用真名，契约不变。
 let apiNames = new Map<string, string>();
 
 function toApiName(name: string): string {
-    return name.replace(/\./g, "__");
+    return name.replace(/\./g, "_");
 }
 
 /** 模型侧工具名 → 注册表真名（未映射的名字原样返回，如内置工具） */
@@ -58,6 +59,11 @@ export function getOpenAITools(): OpenAI.ChatCompletionTool[] {
     apiNames = new Map();
     return [...table.values()].map(({ def }) => {
         const name = toApiName(def.name);
+        // 编码后撞名属于配置错误（如插件 id 含 "." 的场景），显式报出而不是静默错路由
+        const prev = apiNames.get(name);
+        if (prev && prev !== def.name) {
+            throw new Error(`工具名编码冲突: ${prev} 与 ${def.name} 都映射为 ${name}`);
+        }
         apiNames.set(name, def.name);
         return {
             type: "function",

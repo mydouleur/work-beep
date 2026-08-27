@@ -2,6 +2,7 @@
 // 从 ChatView 抽出（原 send()）：UI 状态走 chat store，API 历史自持，
 // 工具列表每轮现取注册表（内置工具 ∪ 活跃插件注入工具），派发前做 schema 校验。
 import { reactive } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import OpenAI from "openai";
 import { useChatStore } from "../stores/chat";
 import type { ChatMessage } from "../stores/chat";
@@ -9,19 +10,55 @@ import { execute, getOpenAITools } from "../tools/registry";
 
 // OpenAI 兼容接口，配置见 .env.example
 // VITE_LLM_API_URL 填服务商文档给的完整 baseURL（一般已含 /v1），代码原样透传
-const API_URL = import.meta.env.VITE_LLM_API_URL as string | undefined;
-const API_KEY = import.meta.env.VITE_LLM_API_KEY as string | undefined;
-const MODEL = (import.meta.env.VITE_LLM_MODEL as string | undefined) ?? "gpt-4o-mini";
+// 配置来源：dev 走 Vite 构建期注入的 import.meta.env（读仓库根目录 .env）；
+// release（打包 exe）构建期没有 .env，回退到运行时读基准目录 .env（Rust root_env，
+// release 锚 exe 同目录、dev 锚仓库根目录）。加载一次后缓存。
+interface LlmConfig {
+    url?: string;
+    key?: string;
+    model: string;
+}
+
+let cfgPromise: Promise<LlmConfig> | null = null;
+
+function loadConfig(): Promise<LlmConfig> {
+    if (cfgPromise) return cfgPromise;
+    cfgPromise = (async () => {
+        const env: Record<string, string | undefined> = {};
+        // import.meta.env 缺失时回退读运行时 .env（release 场景）
+        if (!import.meta.env.VITE_LLM_API_URL) {
+            const text = await invoke<string>("root_env").catch(() => "");
+            for (const line of text.split(/\r?\n/)) {
+                const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/);
+                if (m) env[m[1]] = m[2];
+            }
+        }
+        return {
+            url: import.meta.env.VITE_LLM_API_URL ?? env.VITE_LLM_API_URL,
+            key: import.meta.env.VITE_LLM_API_KEY ?? env.VITE_LLM_API_KEY,
+            model: import.meta.env.VITE_LLM_MODEL ?? env.VITE_LLM_MODEL ?? "gpt-4o-mini",
+        };
+    })();
+    return cfgPromise;
+}
 
 // 桌面应用 key 本来就在前端，本地服务也不校验 key
 // timeout 30s（SDK 默认 10 分钟太久）、maxRetries 1（默认 2，失败时静默重试拖很久）
-const client = new OpenAI({
-    baseURL: API_URL ?? "",
-    apiKey: API_KEY || "local",
-    dangerouslyAllowBrowser: true,
-    timeout: 30_000,
-    maxRetries: 1,
-});
+// 客户端随首份配置懒创建（配置是运行时异步读到的，不能模块顶层建）
+let client: OpenAI | null = null;
+
+function clientOf(cfg: LlmConfig): OpenAI {
+    if (!client) {
+        client = new OpenAI({
+            baseURL: cfg.url ?? "",
+            apiKey: cfg.key || "local",
+            dangerouslyAllowBrowser: true,
+            timeout: 30_000,
+            maxRetries: 1,
+        });
+    }
+    return client;
+}
 
 // 系统提示：助手人设 + 工具纪律 + 排版要求，不进 UI 消息列表
 const SYSTEM_PROMPT = [
@@ -51,14 +88,17 @@ export async function send() {
     const text = chat.input.trim();
     if (!text || chat.sending) return;
 
-    // env 在 dev server 启动时注入：启动后才创建/修改 .env 需要重启才能读到
-    if (!API_URL) {
+    // 配置运行时懒加载（只加载一次，修改 .env 需重启应用）：
+    // dev 读仓库根目录 .env（Vite 注入），release 读 exe 同目录 .env
+    const cfg = await loadConfig();
+    if (!cfg.url) {
         chat.messages.push({
             role: "assistant",
-            content: "未读到 VITE_LLM_API_URL：请确认 .env 存在于项目根目录，并重启 pnpm tauri dev（.env 只在启动时加载）",
+            content: "未读到 LLM 配置：请把 .env 放到 exe 同目录（dev 为项目根目录，格式见 .env.example），重启应用后生效",
         });
         return;
     }
+    const llm = clientOf(cfg);
 
     chat.messages.push({ role: "user", content: text });
     apiHistory.push({ role: "user", content: text });
@@ -77,13 +117,13 @@ export async function send() {
         for (let round = 0; ; round++) {
             // chat_template_kwargs 不在 SDK 类型里，先用变量装（避开字面量超额属性检查）再传入
             const body = {
-                model: MODEL,
+                model: cfg.model,
                 messages: apiHistory,
                 stream: true as const,
                 tools: getOpenAITools(),
                 chat_template_kwargs: { enable_thinking: chat.thinking === "on" },
             };
-            const stream = await client.chat.completions.create(
+            const stream = await llm.chat.completions.create(
                 body,
                 { signal: abortCtrl.signal },
             );

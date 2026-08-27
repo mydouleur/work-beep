@@ -3,7 +3,8 @@
 ## 项目概览
 
 blenderBeeper 的**主项目（Host）**：Tauri 2 + Vue 3 桌面壳，定位智能体启动器。
-左侧 Chat 是软件本体（LLM 走云端 OpenAI 兼容 API，配置在 .env），右栏是**运行时加载**的插件容器
+左侧 Chat 是软件本体（LLM 走云端 OpenAI 兼容 API，配置在 .env：dev 读项目根目录，
+release exe 读 exe 同目录，经 Rust `root_env` 命令运行时加载），右栏是**运行时加载**的插件容器
 （exe 旁 `plugins/` 目录，dev 时为仓库内 `plugins/`）。插件契约见 `@beep/sdk`
 （work-beep-plugin-sdk 仓库），首个参考插件是 work-beep-plugin-blender。
 
@@ -57,7 +58,7 @@ pnpm dist:host            # 组装 dist-host/（beep-host.exe + plugins/），�
 
 ## 安全
 
-- `.env`（LLM API key）不进版本库；只走环境变量。
+- `.env`（LLM API key）不进版本库；dev 由 Vite 注入，release 由 Rust `root_env` 读 exe 同目录。
 - fs 插件 scope 只放行：用户显式选择的工作区目录 + 插件目录（运行时 `allow_directory`）。
 - 内置工具无 shell；插件工具注入是模型能力面的唯一扩展通道。
 - 桥转发只连 `127.0.0.1`；`plugins/`、`dist-host/`、`blender_packges` 类大体积产物不进库。

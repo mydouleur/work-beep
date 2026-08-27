@@ -373,3 +373,14 @@ pub fn set_workspace(app: tauri::AppHandle, path: String) -> Result<(), String> 
         .allow_directory(&path, true)
         .map_err(|e| e.to_string())
 }
+
+/// 读基准目录下的 .env（release 锚 exe 同目录、dev 锚仓库根目录，与 base_dir 一致）。
+/// release 包的 LLM 运行时配置入口：Vite 的 VITE_* 是构建期注入的，打包 exe 读不到，
+/// 由前端在 import.meta.env 缺失时回退到本命令。文件不存在返回空串（不算错误）。
+#[tauri::command]
+pub fn root_env() -> Result<String, String> {
+    match std::fs::read_to_string(base_dir().join(".env")) {
+        Ok(s) => Ok(s),
+        Err(_) => Ok(String::new()),
+    }
+}

@@ -26,7 +26,8 @@ pub fn run() {
             procs::proc_kill,
             procs::bridge_call,
             procs::plugins_dir,
-            procs::set_workspace
+            procs::set_workspace,
+            procs::root_env
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

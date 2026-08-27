@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import OpenAI from "openai";
 import { useChatStore } from "../stores/chat";
 import type { ChatMessage } from "../stores/chat";
-import { execute, getOpenAITools } from "../tools/registry";
+import { execute, getOpenAITools, realName } from "../tools/registry";
 
 // OpenAI 兼容接口，配置见 .env.example
 // VITE_LLM_API_URL 填服务商文档给的完整 baseURL（一般已含 /v1），代码原样透传
@@ -166,7 +166,7 @@ export async function send() {
                 })),
             });
             for (const call of calls) {
-                chat.messages.push({ role: "tool", content: `调用工具 ${call.name}` });
+                chat.messages.push({ role: "tool", content: `调用工具 ${realName(call.name)}` });
                 const result = await execute(call.name, call.arguments);
                 apiHistory.push({ role: "tool", tool_call_id: call.id, content: result });
             }

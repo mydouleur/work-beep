@@ -40,15 +40,34 @@ export function unregisterPlugin(pluginId: string) {
     }
 }
 
+// OpenAI function name 只允许 a-zA-Z0-9_-（服务端 400 硬校验），而插件工具名带 "." 前缀。
+// 这里是 API 边界上的纯编码层：发 schema 时把 "." 改写为 "__"，执行 tool_call 时按映射找回
+// 真名。注册表内部与插件契约始终用真名（blender.view_front），契约不变。
+let apiNames = new Map<string, string>();
+
+function toApiName(name: string): string {
+    return name.replace(/\./g, "__");
+}
+
+/** 模型侧工具名 → 注册表真名（未映射的名字原样返回，如内置工具） */
+export function realName(name: string): string {
+    return apiNames.get(name) ?? name;
+}
+
 export function getOpenAITools(): OpenAI.ChatCompletionTool[] {
-    return [...table.values()].map(({ def }) => ({
-        type: "function",
-        function: {
-            name: def.name,
-            description: def.description,
-            parameters: def.parameters,
-        },
-    }));
+    apiNames = new Map();
+    return [...table.values()].map(({ def }) => {
+        const name = toApiName(def.name);
+        apiNames.set(name, def.name);
+        return {
+            type: "function",
+            function: {
+                name,
+                description: def.description,
+                parameters: def.parameters,
+            },
+        };
+    });
 }
 
 // 手写 JSON-Schema 子集校验：required 缺漏 + properties 基本类型。
@@ -73,8 +92,9 @@ function validate(def: ToolDef, args: Record<string, unknown>): string | null {
 }
 
 // 派发执行：JSON 解析失败、schema 校验失败、run 抛错都返回错误文案（进 tool 消息回灌模型）
+// name 是模型侧名字（插件工具的 "." 已被编码为 "__"），先映射回真名再查表
 export async function execute(name: string, argsJson: string): Promise<string> {
-    const entry = table.get(name);
+    const entry = table.get(realName(name));
     if (!entry) return `未知工具: ${name}`;
 
     let args: Record<string, unknown>;

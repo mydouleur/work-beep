@@ -5,6 +5,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { PluginContext, Rect } from "@beep/sdk";
 import { discoverPlugins } from "../plugins/loader";
 import type { LoadedPlugin } from "../plugins/loader";
@@ -32,6 +33,68 @@ function makeCtx(p: LoadedPlugin): PluginContext {
         syncRect: (pid, rect) => invoke("proc_move", { pid, ...rect }),
         call: (port, cmd, params) => invoke("bridge_call", { port, cmd, params }),
         resolveAsset: (rel) => `${p.dir}\\assets\\${rel.replace(/\//g, "\\")}`,
+        exists: (path) => invoke<boolean>("file_exists", { path }),
+        async download(url, dest, onProgress) {
+            const unlisten = await listen<{ dest: string; done: number; total: number }>(
+                "http-download-progress",
+                (ev) => {
+                    if (ev.payload.dest === dest) {
+                        onProgress?.(ev.payload.done, ev.payload.total);
+                    }
+                },
+            );
+            try {
+                await invoke("http_download", { url, dest });
+            } finally {
+                unlisten();
+            }
+        },
+        extractZip: (zipPath, destDir) => invoke("zip_extract", { zipPath, destDir }),
+        removePath: (path) => invoke("remove_path", { path }),
+        async pickFile(opts) {
+            const selected = await open({
+                multiple: false,
+                directory: false,
+                title: opts?.title ?? "选择文件",
+                filters: opts?.filters,
+            });
+            if (selected === null) return null;
+            return Array.isArray(selected) ? (selected[0] ?? null) : selected;
+        },
+        runCapture: (executable, args, opts) =>
+            invoke("proc_capture", {
+                executable,
+                args,
+                timeoutMs: opts?.timeoutMs ?? null,
+            }),
+        readText: (path) => invoke<string>("read_text_file", { path }),
+        writeText: (path, contents) => invoke("write_text_file", { path, contents }),
+        async runProcess(opts) {
+            const session = crypto.randomUUID();
+            const unlisten = await listen<{
+                session: string;
+                stream: string;
+                line: string;
+            }>("proc-stream-line", (ev) => {
+                if (ev.payload.session !== session) return;
+                if (ev.payload.stream === "stdout") {
+                    opts.onStdoutLine?.(ev.payload.line);
+                } else if (ev.payload.stream === "stderr") {
+                    opts.onStderrLine?.(ev.payload.line);
+                }
+            });
+            try {
+                const code = await invoke<number>("proc_stream", {
+                    session,
+                    executable: opts.executable,
+                    args: opts.args,
+                    cwd: opts.cwd ?? null,
+                });
+                return { code };
+            } finally {
+                unlisten();
+            }
+        },
         rectOf,
         watchRect(el, cb) {
             const emit = () => {
@@ -125,6 +188,15 @@ export const usePluginsStore = defineStore("plugins", () => {
         syncRect: (...a) => mustActiveCtx().syncRect(...a),
         call: (...a) => mustActiveCtx().call(...a),
         resolveAsset: (...a) => mustActiveCtx().resolveAsset(...a),
+        exists: (...a) => mustActiveCtx().exists(...a),
+        download: (...a) => mustActiveCtx().download(...a),
+        extractZip: (...a) => mustActiveCtx().extractZip(...a),
+        removePath: (...a) => mustActiveCtx().removePath(...a),
+        pickFile: (...a) => mustActiveCtx().pickFile(...a),
+        runCapture: (...a) => mustActiveCtx().runCapture(...a),
+        readText: (...a) => mustActiveCtx().readText(...a),
+        writeText: (...a) => mustActiveCtx().writeText(...a),
+        runProcess: (...a) => mustActiveCtx().runProcess(...a),
         rectOf: (...a) => mustActiveCtx().rectOf(...a),
         watchRect: (...a) => mustActiveCtx().watchRect(...a),
     };

@@ -3,10 +3,19 @@
 // 工具列表每轮现取注册表（内置工具 ∪ 活跃插件注入工具），派发前做 schema 校验。
 import { reactive } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { readFile } from "@tauri-apps/plugin-fs";
 import OpenAI from "openai";
 import { useChatStore } from "../stores/chat";
 import type { ChatMessage } from "../stores/chat";
-import { execute, getOpenAITools, realName } from "../tools/registry";
+import { execute, getOpenAITools, realName, resetToolChain } from "../tools/registry";
+import {
+    SEMANTIC_INSPECT_TOOL,
+    buildJudgePrompt,
+    combineVerdict,
+    parseHarnessJson,
+    parseSemanticInspect,
+    type SemanticSnapshot,
+} from "./semantic";
 
 // OpenAI 兼容接口，配置见 .env.example
 // VITE_LLM_API_URL 填服务商文档给的完整 baseURL（一般已含 /v1），代码原样透传
@@ -43,7 +52,8 @@ function loadConfig(): Promise<LlmConfig> {
 }
 
 // 桌面应用 key 本来就在前端，本地服务也不校验 key
-// timeout 30s（SDK 默认 10 分钟太久）、maxRetries 1（默认 2，失败时静默重试拖很久）
+// timeout 120s：三视图验收会把 PNG 放进下一次请求，30s 不够
+// maxRetries 0：429 只由 harness 的 withRateLimitRetry 处理，避免和 SDK 重试叠加
 // 客户端随首份配置懒创建（配置是运行时异步读到的，不能模块顶层建）
 let client: OpenAI | null = null;
 
@@ -53,8 +63,8 @@ function clientOf(cfg: LlmConfig): OpenAI {
             baseURL: cfg.url ?? "",
             apiKey: cfg.key || "local",
             dangerouslyAllowBrowser: true,
-            timeout: 30_000,
-            maxRetries: 1,
+            timeout: 120_000,
+            maxRetries: 0,
         });
     }
     return client;
@@ -62,22 +72,275 @@ function clientOf(cfg: LlmConfig): OpenAI {
 
 // 系统提示：助手人设 + 工具纪律 + 排版要求，不进 UI 消息列表
 const SYSTEM_PROMPT = [
-    "你是 blenderBeeper 的助手。用户用自然语言描述需求，你通过调用提供的工具来完成：",
-    "文件工具（read/write/edit/ls/grep）操作当前工作区，带命名空间前缀的工具操作已激活的外部应用。",
-    "操作完成后用简短中文说明结果。",
-    "回答一律使用 Markdown 排版，数学公式用 LaTeX（行内 $...$，独立公式 $$...$$），",
-    "直接输出 Markdown 正文，不要用代码块包裹整篇回答。",
-].join("");
+    "你是 blenderBeeper 的 Blender Agent。",
+    "",
+    "你必须遵守以下规则：",
+    "1. 当用户要求创建、删除、移动、旋转、缩放或修改 Blender 场景中的对象时，必须实际调用提供的 Blender 工具完成操作。",
+    "2. 不要只向用户解释如何在 Blender 中操作，也不要让用户自己手动完成本可由工具完成的操作。",
+    "3. 只能调用当前提供的工具，不得虚构不存在的工具或声称执行了实际上没有执行的操作。",
+    "4. 工具已拆成多条链。每条新用户任务必须先调用 get_toolchain 获取当前需要的那一条，不要沿用上一任务的链。",
+    "5. 链：scene（查/清场景）、object（增删移物体）、mesh（改网格）、modifier（修改器）、material（材质）、light（灯）、camera（相机）、view（视口）、render（出图）、files（工作区文件）。",
+    "6. 改已有物体前先 blender.scene_list_objects。链里没有的工具不许用别的命令冒充。",
+    "7. 多部件模型保持独立 object，不要为了出图做 Boolean。出整体三视图用 render 链的 blender.render_scene_views。",
+    "8. 文件工具在 files 链。如果完成任务需要多个操作，应继续调用必要的工具，直到任务完成或达到工具调用上限。",
+    "9. 如果工具返回错误，根据错误信息修正操作；无法完成时明确说明失败原因。",
+    "10. 只有在工具成功执行后，才能告诉用户相应操作已经完成。",
+    "11. 完成后用简短中文总结实际完成的操作。",
+    "12. 多部件模型先规划部件和语义分组：按用户任务里的功能划分组，组数按需要，不限三种；同功能部件同组同色，不同组颜色明显不同。每个物理部件仍是独立 object。单个简单物体不必分组。",
+    "13. 几何建完后切到 material 链，用一次 blender.material_assign_semantic 为所有组上色并写入语义标签，不要逐个 material_create / material_assign。颜色只是语义标签，不代表父子层级；层级用 object_set_parent 建立。",
+    "14. 上过语义色的模型，调用 blender.render_scene_views 时传 shading=\"semantic\"，让颜色不受灯光影响。验收会同时检查 颜色 → 逻辑 和 三视图 → 结构，语义正确不能弥补结构错误。",
+].join("\n");
 
 // API 侧会话历史（含 system / assistant 的 tool_calls / 工具结果），与 UI 消息分开维护
 const apiHistory: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
 ];
+// 仅 appendRenderedViews 推入的验收图消息。清旧图时只删这些对象。
+const harnessRenderMessages = new Set<OpenAI.ChatCompletionMessageParam>();
+// 最近一次出图时采集的场景语义数据，JUDGE_ONLY 判定后用它做确定性复核
+let latestSemantic: SemanticSnapshot | null = null;
 
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 50;
+const MAX_HARNESS_ITERATIONS = 5;
+// 首次请求之外的 429 重试次数。同一请求原地重试，不推进 tool round / harness iteration。
+const MAX_RATE_LIMIT_RETRIES = 5;
 
 // 当前请求的取消控制器，停止按钮（■）触发
 let abortCtrl: AbortController | null = null;
+
+// llama.cpp / vLLM 用 chat_template_kwargs.enable_thinking 控制思考。
+// OpenAI 官方与 Azure OpenAI 不认该字段，带上会 400 Unknown parameter。
+// 其它兼容网关若同样拒绝，本会话后续请求不再带上。
+let skipChatTemplateKwargs = false;
+
+// gpt-6 等推理模型在 /v1/chat/completions 里默认带 reasoning，
+// 与 function tools 冲突，必须显式 reasoning_effort=none。命中过该 400 的模型记在这里。
+const reasoningNoneModels = new Set<string>();
+
+function isOfficialOpenAI(url: string | undefined): boolean {
+    if (!url) return false;
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === "api.openai.com" || host.endsWith(".openai.azure.com");
+    } catch {
+        return false;
+    }
+}
+
+function supportsChatTemplateKwargs(url: string | undefined): boolean {
+    if (skipChatTemplateKwargs || !url || isOfficialOpenAI(url)) return false;
+    try {
+        new URL(url);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function modelNeedsReasoningNone(model: string): boolean {
+    if (reasoningNoneModels.has(model)) return true;
+    // o 系列、gpt-5 / gpt-6 默认会推理；chat completions + 工具时必须关掉
+    return /^(o\d|gpt-5|gpt-6)/i.test(model);
+}
+
+function rejectedChatTemplateKwargs(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /unknown parameter/i.test(msg) && /chat_template_kwargs/.test(msg);
+}
+
+function rejectedToolsWithReasoning(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /function tools with reasoning_effort/i.test(msg);
+}
+
+function resetApiHistory() {
+    apiHistory.splice(1);
+    harnessRenderMessages.clear();
+    latestSemantic = null;
+    apiHistory[0] = { role: "system", content: SYSTEM_PROMPT };
+    console.log("[HARNESS] api history reset", { messages: apiHistory.length });
+}
+
+function dropPreviousRenderedViews() {
+    if (harnessRenderMessages.size === 0) return;
+    let removed = 0;
+    for (let i = apiHistory.length - 1; i >= 1; i--) {
+        if (!harnessRenderMessages.has(apiHistory[i])) continue;
+        apiHistory.splice(i, 1);
+        removed++;
+    }
+    harnessRenderMessages.clear();
+    console.log("[HARNESS] drop previous rendered views", { removed, messages: apiHistory.length });
+}
+
+type RateLimitError = InstanceType<typeof OpenAI.APIError>;
+
+function isRateLimitError(err: unknown): err is RateLimitError {
+    return err instanceof OpenAI.APIError && err.status === 429;
+}
+
+function rateLimitWaitMs(err: RateLimitError, attempt: number): number {
+    const msHeader = err.headers?.get("retry-after-ms");
+    if (msHeader) {
+        const ms = Number(msHeader);
+        if (Number.isFinite(ms) && ms >= 0) return ms;
+    }
+    const after = err.headers?.get("retry-after");
+    if (after) {
+        const seconds = Number(after);
+        if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+        const when = Date.parse(after);
+        if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+    }
+    const exp = Math.min(60_000, 1000 * 2 ** attempt);
+    return Math.round(exp / 2 + Math.random() * (exp / 2));
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (signal.aborted) {
+            reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+            return;
+        }
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+async function withRateLimitRetry<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await run();
+        } catch (err) {
+            if (signal.aborted || !isRateLimitError(err) || attempt >= MAX_RATE_LIMIT_RETRIES) throw err;
+            const waitMs = rateLimitWaitMs(err, attempt);
+            console.log("[HARNESS] rate limit", {
+                attempt: attempt + 1,
+                maxAttempts: MAX_RATE_LIMIT_RETRIES + 1,
+                waitMs,
+            });
+            await sleepWithAbort(waitMs, signal);
+        }
+    }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+    const chunkSize = 0x8000;
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+}
+
+async function pngToDataUrl(path: string): Promise<string> {
+    const bytes = await readFile(path);
+    return `data:image/png;base64,${bytesToBase64(bytes)}`;
+}
+
+function failFixInstruction(fixes: unknown[]): string {
+    return (
+        "视觉验收未通过（pass=false）。请只根据下列 priority_fixes 修改当前场景中的现有物体。" +
+        "不要清场、不要 Boolean 合并、不要从零重建。\n" +
+        "结构问题（形状/位置/连接/比例）用 object、mesh 链修改；缺少的部件要实际创建。" +
+        "语义问题（分组/颜色/标签）切到 material 链，用一次 blender.material_assign_semantic 修正。\n" +
+        "改物体前用 get_toolchain 切到对应链；改完后必须 get_toolchain 切到 render，再调用 blender.render_scene_views 生成 front/right/top（上过语义色时传 shading=\"semantic\"）。\n" +
+        JSON.stringify(fixes, null, 2)
+    );
+}
+
+/** render_scene_views 成功时把三张 PNG 写入 apiHistory，返回 true 表示下一轮进入 JUDGE_ONLY。 */
+async function appendRenderedViews(toolName: string, result: string, originalUserRequest: string): Promise<boolean> {
+    const name = realName(toolName);
+    if (name !== "blender.render_scene_views") return false;
+
+    let data: {
+        ok?: boolean;
+        output_dir?: string;
+        views?: { ok?: boolean; path?: string }[];
+        results?: { ok?: boolean; path?: string }[];
+        data?: {
+            ok?: boolean;
+            output_dir?: string;
+            views?: { ok?: boolean; path?: string }[];
+            results?: { ok?: boolean; path?: string }[];
+        };
+    };
+    try {
+        data = JSON.parse(result);
+    } catch {
+        console.log("[HARNESS] rendered views attached", { count: 0, reason: "result 不是 JSON" });
+        return false;
+    }
+    if (data?.data && typeof data.data === "object") {
+        data = { ...data, ...data.data };
+    }
+    if (!data?.ok) {
+        console.log("[HARNESS] rendered views attached", { count: 0, reason: "ok 不为 true" });
+        return false;
+    }
+
+    const renderedViews = Array.isArray(data.views)
+        ? data.views
+        : Array.isArray(data.results)
+          ? data.results
+          : [];
+    if (renderedViews.length === 0) {
+        console.log("[HARNESS] rendered views attached", { count: 0, reason: "没有 views/results" });
+        return false;
+    }
+
+    if (typeof data.output_dir === "string" && data.output_dir) {
+        await invoke("set_workspace", { path: data.output_dir });
+    }
+
+    const imageParts: OpenAI.Chat.ChatCompletionContentPart[] = [];
+    const paths: string[] = [];
+    for (const view of renderedViews) {
+        if (!view?.ok || typeof view.path !== "string") continue;
+        try {
+            const url = await pngToDataUrl(view.path);
+            imageParts.push({ type: "image_url", image_url: { url } });
+            paths.push(view.path);
+        } catch (err) {
+            console.error("[HARNESS] rendered views attached", { path: view.path, error: err });
+        }
+    }
+    if (imageParts.length === 0) {
+        console.log("[HARNESS] rendered views attached", { count: 0, reason: "没有读到 PNG" });
+        return false;
+    }
+
+    dropPreviousRenderedViews();
+    console.log("[HARNESS] rendered views attached", { count: imageParts.length, paths });
+
+    // Host 直接查场景语义数据，不占 LLM 轮次；插件旧版或查询失败时语义信号记为不可用
+    latestSemantic = parseSemanticInspect(await execute(SEMANTIC_INSPECT_TOOL, "{}"));
+    console.log("[HARNESS] semantic snapshot", {
+        available: latestSemantic.available,
+        annotated: latestSemantic.annotated,
+        groups: latestSemantic.groups.map((g) => ({ group: g.group, objects: g.objects.length })),
+        issues: latestSemantic.issues.map((i) => i.code),
+        error: latestSemantic.error,
+    });
+    const renderMessage: OpenAI.ChatCompletionMessageParam = {
+        role: "user",
+        content: [
+            { type: "text", text: buildJudgePrompt(originalUserRequest, latestSemantic) },
+            ...imageParts,
+        ],
+    };
+    apiHistory.push(renderMessage);
+    harnessRenderMessages.add(renderMessage);
+    return true;
+}
 
 export function stop() {
     abortCtrl?.abort();
@@ -99,36 +362,92 @@ export async function send() {
         return;
     }
     const llm = clientOf(cfg);
+    resetApiHistory();
+    resetToolChain();
 
+    const originalUserRequest = text;
     chat.messages.push({ role: "user", content: text });
     apiHistory.push({ role: "user", content: text });
     chat.input = "";
     chat.sending = true;
     abortCtrl = new AbortController();
 
-    // 先放一条空的助手消息，流式逐段往里追加（跨工具轮次共用同一条）
-    // 注意必须是 reactive：普通对象 push 进数组后，改原始引用不会触发 Vue 更新，
-    // 就会出现"流式期间界面不动、结束时一次性闪出来"
-    const reply = reactive<ChatMessage>({ role: "assistant", content: "", think: "" });
+    // 每一轮 LLM 请求换一条助手消息，避免建模文字和验收 JSON 拼进同一 content。
+    // 必须是 reactive：普通对象 push 进数组后，改原始引用不会触发 Vue 更新。
+    let reply = reactive<ChatMessage>({ role: "assistant", content: "", think: "" });
     chat.messages.push(reply);
+    let harnessRound = 0;
+    // BUILD 可调用工具。JUDGE_ONLY 只看图出 JSON，请求不带 tools，模型若仍给出 tool_calls 也不执行。
+    let awaitingHarness = false;
+    let harnessNags = 0;
 
     try {
-        // 工具调用循环：模型返回 tool_calls 就执行工具、把结果回灌进历史，再开下一轮
         for (let round = 0; ; round++) {
-            // chat_template_kwargs 不在 SDK 类型里，先用变量装（避开字面量超额属性检查）再传入
+            if (round > 0) {
+                reply = reactive<ChatMessage>({ role: "assistant", content: "", think: "" });
+                chat.messages.push(reply);
+            }
+            const judging = awaitingHarness;
+            console.log("[HARNESS] harness state", {
+                state: judging ? "JUDGE_ONLY" : harnessRound > 0 ? "FIX" : "BUILD",
+                round,
+                harnessRound,
+            });
+
+            // 官方 OpenAI 不带 chat_template_kwargs。带工具的 gpt-5 / gpt-6 必须 reasoning_effort=none。
+            // JUDGE_ONLY 不传 tools，因此也不会带 reasoning_effort。
+            const tools = judging ? [] : getOpenAITools();
+            const extra = supportsChatTemplateKwargs(cfg.url)
+                ? { chat_template_kwargs: { enable_thinking: chat.thinking === "on" } }
+                : isOfficialOpenAI(cfg.url) && tools.length > 0 && modelNeedsReasoningNone(cfg.model)
+                  ? { reasoning_effort: "none" as const }
+                  : {};
             const body = {
                 model: cfg.model,
                 messages: apiHistory,
                 stream: true as const,
-                tools: getOpenAITools(),
-                chat_template_kwargs: { enable_thinking: chat.thinking === "on" },
+                ...(judging ? {} : { tools }),
+                ...extra,
             };
-            const stream = await llm.chat.completions.create(
-                body,
-                { signal: abortCtrl.signal },
-            );
+            const requestOptions = { signal: abortCtrl.signal, maxRetries: 0 };
+            let stream;
+            try {
+                stream = await withRateLimitRetry(abortCtrl.signal, () =>
+                    llm.chat.completions.create(body, requestOptions),
+                );
+            } catch (err) {
+                if ("chat_template_kwargs" in body && rejectedChatTemplateKwargs(err)) {
+                    skipChatTemplateKwargs = true;
+                    stream = await withRateLimitRetry(abortCtrl.signal, () =>
+                        llm.chat.completions.create(
+                            {
+                                model: body.model,
+                                messages: body.messages,
+                                stream: body.stream,
+                                ...(judging ? {} : { tools }),
+                            },
+                            requestOptions,
+                        ),
+                    );
+                } else if (rejectedToolsWithReasoning(err) && body.reasoning_effort !== "none") {
+                    reasoningNoneModels.add(cfg.model);
+                    stream = await withRateLimitRetry(abortCtrl.signal, () =>
+                        llm.chat.completions.create(
+                            {
+                                model: body.model,
+                                messages: body.messages,
+                                stream: body.stream,
+                                ...(judging ? {} : { tools }),
+                                reasoning_effort: "none",
+                            },
+                            requestOptions,
+                        ),
+                    );
+                } else {
+                    throw err;
+                }
+            }
 
-            // 流式 tool_calls 按 index 分片累积
             const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
             for await (const chunk of stream) {
                 const delta = chunk.choices[0]?.delta;
@@ -148,27 +467,137 @@ export async function send() {
                 }
             }
 
-            // 无工具调用：本轮即最终回复，收尾
+            const rawVerdict = parseHarnessJson(reply.content);
+            // 只在 JUDGE_ONLY 轮汇总：LLM 的结构/语义判定 + 场景数据上的确定性复核
+            const combined = rawVerdict && judging ? combineVerdict(rawVerdict, latestSemantic) : null;
+            const verdict = combined ?? rawVerdict;
+            if (combined) {
+                console.log("[HARNESS] combined verdict", {
+                    pass: combined.pass,
+                    structural: combined.structural,
+                    semantic: combined.semantic,
+                    critical_issues: combined.critical_issues,
+                    harness: combined.harness,
+                });
+                if (combined.harness.overridden) {
+                    chat.messages.push({
+                        role: "tool",
+                        content: `Harness 复核未通过：${combined.harness.deterministic_issues.join("；") || "结构或语义维度判定为失败"}`,
+                    });
+                }
+            }
+            if (verdict?.pass === true) {
+                console.log("[HARNESS] judge result", {
+                    pass: true,
+                    priority_fixes: verdict.priority_fixes ?? [],
+                    overall_score: verdict.overall_score,
+                });
+                console.log("[HARNESS] harness state", {
+                    state: "STOP",
+                    reason: "pass",
+                    ignoredToolCalls: [...toolCalls.values()].map((t) => realName(t.name)),
+                });
+                apiHistory.push({ role: "assistant", content: reply.content });
+                return;
+            }
+            if (verdict?.pass === false) {
+                const fixes = Array.isArray(verdict.priority_fixes) ? verdict.priority_fixes : [];
+                console.log("[HARNESS] judge result", {
+                    pass: false,
+                    priority_fixes: fixes,
+                    overall_score: verdict.overall_score,
+                });
+                apiHistory.push({ role: "assistant", content: reply.content });
+                if (harnessRound >= MAX_HARNESS_ITERATIONS) {
+                    console.log("[HARNESS] harness state", {
+                        state: "STOP",
+                        reason: "max harness iterations",
+                        harnessRound,
+                    });
+                    return;
+                }
+                harnessRound += 1;
+                awaitingHarness = false;
+                harnessNags = 0;
+                console.log("[HARNESS] harness state", {
+                    state: "FIX",
+                    harnessRound,
+                    priority_fixes: fixes,
+                    ignoredToolCalls: [...toolCalls.values()].map((t) => realName(t.name)),
+                });
+                apiHistory.push({ role: "user", content: failFixInstruction(fixes) });
+                continue;
+            }
+
+            if (awaitingHarness) {
+                console.log("[HARNESS] judge result", { pass: null, raw: reply.content });
+                apiHistory.push({
+                    role: "assistant",
+                    content: reply.content || "（本轮未输出验收 JSON）",
+                });
+                if (!reply.content) reply.content = "（视觉验收轮次已忽略工具调用，请输出 JSON）";
+                harnessNags += 1;
+                if (harnessNags > 2) {
+                    console.log("[HARNESS] harness state", {
+                        state: "STOP",
+                        reason: "judge json missing",
+                        ignoredToolCalls: [...toolCalls.values()].map((t) => realName(t.name)),
+                    });
+                    return;
+                }
+                console.log("[HARNESS] harness state", {
+                    state: "JUDGE_ONLY",
+                    reason: "retry json",
+                    harnessNags,
+                    ignoredToolCalls: [...toolCalls.values()].map((t) => realName(t.name)),
+                });
+                apiHistory.push({
+                    role: "user",
+                    content: "请只返回视觉验收 JSON，不要调用任何工具，不要输出 Markdown 或其它文字。",
+                });
+                continue;
+            }
+
             if (toolCalls.size === 0) {
                 apiHistory.push({ role: "assistant", content: reply.content });
                 return;
             }
 
-            // 有工具调用：记入 API 历史，逐个执行并回灌结果
             const calls = [...toolCalls.values()];
+            const toRun: typeof calls = [];
+            for (const call of calls) {
+                toRun.push(call);
+                if (realName(call.name) === "blender.render_scene_views") break;
+            }
+            console.log("[HARNESS] tool calls", toRun);
+            if (toRun.length < calls.length) {
+                console.log("[HARNESS] harness state", {
+                    state: "BUILD",
+                    droppedAfterRender: calls.slice(toRun.length).map((t) => realName(t.name)),
+                });
+            }
             apiHistory.push({
                 role: "assistant",
                 content: reply.content || null,
-                tool_calls: calls.map((t) => ({
+                tool_calls: toRun.map((t) => ({
                     id: t.id,
                     type: "function" as const,
                     function: { name: t.name, arguments: t.arguments },
                 })),
             });
-            for (const call of calls) {
+            for (const call of toRun) {
                 chat.messages.push({ role: "tool", content: `调用工具 ${realName(call.name)}` });
                 const result = await execute(call.name, call.arguments);
+                console.log("[HARNESS] tool result", {
+                    tool: call.name,
+                    arguments: call.arguments,
+                    result,
+                });
                 apiHistory.push({ role: "tool", tool_call_id: call.id, content: result });
+                if (await appendRenderedViews(call.name, result, originalUserRequest)) {
+                    awaitingHarness = true;
+                    harnessNags = 0;
+                }
             }
             if (round + 1 >= MAX_TOOL_ROUNDS) throw new Error("工具调用轮次超限");
         }
